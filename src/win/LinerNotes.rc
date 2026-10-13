@@ -1,0 +1,41 @@
+// Icon, Nōto's sprites and version information for LinerNotes.dll.
+// Built with windres -I res (see build-mingw.sh); the image files live in res/.
+#include <windows.h>
+#include "resource.h"
+
+IDI_LINERNOTES ICON   "linernotes.ico"
+
+IDB_NOTO_IDLE  BITMAP "noto-idle.bmp"
+IDB_NOTO_BUSY  BITMAP "noto-busy.bmp"
+IDB_NOTO_HAPPY BITMAP "noto-happy.bmp"
+IDB_NOTO_SORRY BITMAP "noto-sorry.bmp"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION     1,0,0,0
+ PRODUCTVERSION  1,0,0,0
+ FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+ FILEFLAGS       0
+ FILEOS          VOS_NT_WINDOWS32
+ FILETYPE        VFT_DLL
+ FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080904B0"
+        BEGIN
+            VALUE "CompanyName",      "capstasher"
+            VALUE "FileDescription",  "LinerNotes - CD album info for Windows Media Player 12"
+            VALUE "FileVersion",      "1.0.0"
+            VALUE "InternalName",     "LinerNotes"
+            VALUE "LegalCopyright",   "Copyright (c) 2026 capstasher. MIT License."
+            VALUE "OriginalFilename", "LinerNotes.dll"
+            VALUE "ProductName",      "LinerNotes"
+            VALUE "ProductVersion",   "1.0.0"
+            VALUE "Comments",         "Noto reads your CD and asks MusicBrainz what it is."
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0809, 1200
+    END
+END

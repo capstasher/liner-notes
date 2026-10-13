@@ -1,0 +1,10 @@
+# Windows batch files must keep CRLF or cmd.exe misreads labels and blocks.
+*.cmd   text eol=crlf
+*.sh    text eol=lf
+*.rc    text
+*.def   text
+
+# Images and resources are binary.
+*.bmp   binary
+*.ico   binary
+*.png   binary
