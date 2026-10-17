@@ -48,17 +48,25 @@ struct DlgCtx {
     HICON icon = nullptr;
 };
 
-struct SearchJob { HWND hwnd; int token; std::string artist, album; int tracks; std::vector<AlbumMeta> out; std::string error; bool ok; };
-struct FetchJob { HWND hwnd; int token; int row; std::string mbid; int tracks; AlbumMeta out; std::string error; bool ok; };
+struct SearchJob {
+    HWND hwnd = nullptr; int token = 0; std::string artist, album; int tracks = 0;
+    DiscToc toc; bool haveToc = false;
+    std::vector<AlbumMeta> out; std::string error; bool ok = false;
+};
+struct FetchJob {
+    HWND hwnd = nullptr; int token = 0; int row = 0; std::string mbid; int tracks = 0;
+    DiscToc toc; bool haveToc = false;
+    AlbumMeta out; std::string error; bool ok = false;
+};
 
 void searchWorker(void* a) {
     auto* j = static_cast<SearchJob*>(a);
-    j->ok = searchReleases(j->artist, j->album, j->tracks, j->out, j->error);
+    j->ok = searchReleases(j->artist, j->album, j->tracks, j->haveToc ? &j->toc : nullptr, j->out, j->error);
     if (!PostMessageW(j->hwnd, WM_APP_SEARCH_DONE, 0, LPARAM(j))) delete j;
 }
 void fetchWorker(void* a) {
     auto* j = static_cast<FetchJob*>(a);
-    j->ok = fetchRelease(j->mbid, j->tracks, j->out, j->error);
+    j->ok = fetchRelease(j->mbid, j->tracks, j->haveToc ? &j->toc : nullptr, j->out, j->error);
     if (!PostMessageW(j->hwnd, WM_APP_FETCH_DONE, 0, LPARAM(j))) delete j;
 }
 
@@ -240,6 +248,13 @@ int trackCountForDisc(DlgCtx* c) {
     return c->plugin->playlistTrackCount(c->idx);
 }
 
+bool tocForDisc(DlgCtx* c, DiscToc& out) {
+    DriveState* st = c->plugin->driveState(c->idx);
+    if (!st || !st->haveLookup || !st->lookup.tocOk) return false;
+    out = st->lookup.toc;
+    return true;
+}
+
 void setNote(DlgCtx* c, Line l, bool chatter = false) {
     c->note = std::move(l);
     c->noteIsChatter = chatter;
@@ -325,7 +340,10 @@ void loadFromPlugin(DlgCtx* c) {
 
 void ensureTracks(DlgCtx* c, int row) {
     if (row < 0 || row >= int(c->list.size()) || c->list[size_t(row)].tracksLoaded) return;
-    auto* j = new FetchJob{c->hwnd, c->token, row, c->list[size_t(row)].id, trackCountForDisc(c), AlbumMeta(), "", false};
+    auto* j = new FetchJob();
+    j->hwnd = c->hwnd; j->token = c->token; j->row = row; j->mbid = c->list[size_t(row)].id;
+    j->tracks = trackCountForDisc(c);
+    j->haveToc = tocForDisc(c, j->toc);
     if (!startWorker(fetchWorker, j)) delete j;
 }
 
@@ -358,8 +376,12 @@ void onApply(DlgCtx* c) {
 
 void onSearch(DlgCtx* c) {
     if (c->searching) return;
-    auto* j = new SearchJob{c->hwnd, 0, getText(GetDlgItem(c->hwnd, IDC_ARTIST)), getText(GetDlgItem(c->hwnd, IDC_ALBUM)),
-                            trackCountForDisc(c), {}, "", false};
+    auto* j = new SearchJob();
+    j->hwnd = c->hwnd;
+    j->artist = getText(GetDlgItem(c->hwnd, IDC_ARTIST));
+    j->album = getText(GetDlgItem(c->hwnd, IDC_ALBUM));
+    j->tracks = trackCountForDisc(c);
+    j->haveToc = tocForDisc(c, j->toc);
     if (j->artist.empty() && j->album.empty()) { delete j; setNote(c, noto::needSearchTerms()); updateStatus(c); return; }
     c->searching = true;
     c->listIsSearch = true;

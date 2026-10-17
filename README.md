@@ -51,7 +51,7 @@ Click her if you fancy a chat. *An OS-tan for a media player plug-in, because so
 
 ## Install
 
-1. Download **LinerNotes-1.0.0.zip** from [Releases](https://github.com/capstasher/liner-notes/releases/latest) and unzip it anywhere.
+1. Download the latest `LinerNotes-<version>.zip` from [Releases](https://github.com/capstasher/liner-notes/releases/latest) and unzip it anywhere.
 2. Close Windows Media Player.
 3. Run **`install.cmd`**. It asks for administrator rights, copies both builds to
    `C:\Program Files\LinerNotes\` and registers them, so it works whether your WMP runs as
@@ -81,7 +81,10 @@ C:\Windows\SysWOW64\regsvr32 "C:\path\to\LinerNotes32.dll"
   artist and album search.
 - **WMP already has titles**: she leaves them alone, unless you tick *Overwrite titles WMP
   already has*. *Apply to CD* always writes.
-- **A disc she's met before** is filled in straight from her notebook, no internet needed.
+- **A disc she's met before** is filled in straight from her notebook, no internet needed,
+  without even reading the drive again.
+- She only ever writes what's different, so a disc WMP already has right is left untouched
+  and WMP stays responsive.
 
 Open her window any time from **Tools → Options → Plug-ins → Background → LinerNotes →
 Properties**.
@@ -93,13 +96,15 @@ Properties**.
 ## How she does it
 
 1. Reads the disc's table of contents straight from the drive.
-2. Works out its MusicBrainz disc ID and freedb ID from the track offsets, handling the data
-   track on Enhanced CDs properly.
+2. Works out its MusicBrainz disc ID and freedb ID from the track offsets, handling data
+   tracks properly, whether they come last (Enhanced CDs) or first (mixed-mode game CDs).
 3. Asks MusicBrainz for that exact disc, then for near matches by table of contents, then
    for CD stubs. GnuDB is the fallback.
 4. Ranks the answers: exact disc ID first, then official releases, your own country's
    pressing, CD formats and labelled releases.
-5. Writes them into WMP's CD listing: title and artist per track, album, album artist,
+5. Lines the tracklist up with WMP's, which only shows audio tracks, so a game disc's data
+   track doesn't push every title down by one.
+6. Writes them into WMP's CD listing: title and artist per track, album, album artist,
    genre, label, and the album's **original** release year.
 
 She's polite about it: never more than one MusicBrainz request a second, a proper
@@ -120,7 +125,7 @@ CD its cover too.
 | Program | `C:\Program Files\LinerNotes\` |
 | Settings | `HKCU\Software\LinerNotes` |
 | Her notebook (log, rotates at 2 MB) | `%LOCALAPPDATA%\LinerNotes\linernotes.log` |
-| Discs she remembers (one JSON per disc) | `%LOCALAPPDATA%\LinerNotes\cache\` |
+| Discs she remembers (one JSON per disc, plus its table of contents) | `%LOCALAPPDATA%\LinerNotes\cache\` |
 
 The window speaks in Nōto's voice; the log stays plain English on purpose, because that's
 what bug reports are read from.

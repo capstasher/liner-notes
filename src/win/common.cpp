@@ -51,7 +51,44 @@ static CRITICAL_SECTION* logLock() {
     return &cs;
 }
 
+static DWORD g_wmpThread = 0;
+static double g_wmpLogMs = 0, g_ourWmpMs = 0;   // touched on WMP's thread only
+static volatile LONG g_phase = LONG(Phase::Idle);
+
+double nowMs() {
+    static LARGE_INTEGER freq = [] { LARGE_INTEGER f; QueryPerformanceFrequency(&f); return f; }();
+    LARGE_INTEGER t; QueryPerformanceCounter(&t);
+    return double(t.QuadPart) * 1000.0 / double(freq.QuadPart);
+}
+void setWmpThread() { g_wmpThread = GetCurrentThreadId(); }
+bool onWmpThread() { return g_wmpThread && GetCurrentThreadId() == g_wmpThread; }
+double wmpThreadLogMs() { return g_wmpLogMs; }
+double ourWmpThreadMs() { return g_ourWmpMs; }
+
+void setPhase(Phase p) { InterlockedExchange(&g_phase, LONG(p)); }
+const char* phaseText() {
+    switch (Phase(g_phase)) {
+    case Phase::ReadingToc: return "reading the disc's table of contents";
+    case Phase::AskingMusicBrainz: return "waiting on MusicBrainz";
+    case Phase::AskingGnuDb: return "waiting on GnuDB";
+    case Phase::Idle: break;
+    }
+    return "idle";
+}
+
+WmpThreadTimer::WmpThreadTimer(const char* what, bool topLevel, double thresholdMs)
+    : m_what(what), m_top(topLevel), m_threshold(thresholdMs), m_t0(nowMs()), m_log0(g_wmpLogMs) {}
+
+WmpThreadTimer::~WmpThreadTimer() {
+    double took = nowMs() - m_t0, logMs = g_wmpLogMs - m_log0;
+    if (m_top) g_ourWmpMs += took;
+    if (took >= m_threshold)
+        logf("Timing: %s took %.0f ms on WMP's thread (%.0f ms of it writing this log).", m_what, took, logMs);
+}
+
 void logLine(const std::string& msg) {
+    const double t0 = nowMs();
+    struct AddLogTime { double t0; ~AddLogTime() { if (onWmpThread()) g_wmpLogMs += nowMs() - t0; } } addLogTime{t0};
     EnterCriticalSection(logLock());
     std::wstring path = logPath();
     WIN32_FILE_ATTRIBUTE_DATA fa;

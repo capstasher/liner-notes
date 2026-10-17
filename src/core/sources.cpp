@@ -38,7 +38,7 @@ static bool mediumHasDisc(const json::Value& medium, const std::string& discId) 
 }
 
 bool parseMbRelease(const json::Value& r, const std::string& discId, int trackCount,
-                    MatchKind kind, AlbumMeta& out) {
+                    MatchKind kind, AlbumMeta& out, int altTrackCount) {
     if (!r.isObject()) return false;
     const auto& media = r["media"];
     int pick = -1;
@@ -46,15 +46,18 @@ bool parseMbRelease(const json::Value& r, const std::string& discId, int trackCo
     if (!discId.empty())
         for (size_t i = 0; i < media.size() && pick < 0; ++i)
             if (mediumHasDisc(media[i], discId)) pick = int(i);
-    // 2) a CD-ish medium with the right number of tracks
-    for (size_t i = 0; i < media.size() && pick < 0; ++i) {
-        int tc = media[i]["track-count"].integer(int(media[i]["tracks"].size()));
-        if (tc == trackCount && media[i]["format"].str().find("CD") != std::string::npos) pick = int(i);
-    }
-    // 3) any medium with the right number of tracks
-    for (size_t i = 0; i < media.size() && pick < 0; ++i) {
-        int tc = media[i]["track-count"].integer(int(media[i]["tracks"].size()));
-        if (tc == trackCount) pick = int(i);
+    const int counts[2] = {trackCount, altTrackCount > 0 ? altTrackCount : trackCount};
+    for (int want : counts) {
+        // 2) a CD-ish medium with the right number of tracks
+        for (size_t i = 0; i < media.size() && pick < 0; ++i) {
+            int tc = media[i]["track-count"].integer(int(media[i]["tracks"].size()));
+            if (tc == want && media[i]["format"].str().find("CD") != std::string::npos) pick = int(i);
+        }
+        // 3) any medium with the right number of tracks
+        for (size_t i = 0; i < media.size() && pick < 0; ++i) {
+            int tc = media[i]["track-count"].integer(int(media[i]["tracks"].size()));
+            if (tc == want) pick = int(i);
+        }
     }
     if (pick < 0) return false;
     const auto& m = media[size_t(pick)];
@@ -103,14 +106,14 @@ bool parseMbRelease(const json::Value& r, const std::string& discId, int trackCo
 }
 
 bool parseMbDiscResponse(const json::Value& root, const std::string& discId, int trackCount,
-                         std::vector<AlbumMeta>& out) {
+                         std::vector<AlbumMeta>& out, int altTrackCount) {
     if (!root.isObject()) return false;
     if (const json::Value* rel = root.find("releases")) {
         // A "disc" object (exact hit) carries its own "id"; a fuzzy TOC hit is a bare release list.
         MatchKind kind = root.find("id") ? MatchKind::DiscId : MatchKind::Fuzzy;
         for (size_t i = 0; i < rel->size(); ++i) {
             AlbumMeta a;
-            if (parseMbRelease((*rel)[i], discId, trackCount, kind, a)) out.push_back(a);
+            if (parseMbRelease((*rel)[i], discId, trackCount, kind, a, altTrackCount)) out.push_back(a);
         }
         return true;
     }
@@ -133,13 +136,15 @@ bool parseMbDiscResponse(const json::Value& root, const std::string& discId, int
             t.lengthMs = tr[i]["length"].integer();
             a.tracks.push_back(t);
         }
-        if (int(a.tracks.size()) == trackCount || trackCount <= 0) out.push_back(a);
+        int n = int(a.tracks.size());
+        if (n == trackCount || (altTrackCount > 0 && n == altTrackCount) || trackCount <= 0) out.push_back(a);
         return true;
     }
     return false;
 }
 
-bool parseMbSearchResponse(const json::Value& root, int trackCount, std::vector<AlbumMeta>& out) {
+bool parseMbSearchResponse(const json::Value& root, int trackCount, std::vector<AlbumMeta>& out,
+                           int altTrackCount) {
     const auto& rel = root["releases"];
     if (!rel.isArray()) return false;
     for (size_t i = 0; i < rel.size(); ++i) {
@@ -162,7 +167,8 @@ bool parseMbSearchResponse(const json::Value& root, int trackCount, std::vector<
         a.discCount = media.size() ? int(media.size()) : 1;
         bool fits = trackCount <= 0;
         for (size_t m = 0; m < media.size(); ++m) {
-            if (media[m]["track-count"].integer() == trackCount) {
+            int tc = media[m]["track-count"].integer();
+            if (tc == trackCount || (altTrackCount > 0 && tc == altTrackCount)) {
                 fits = true;
                 a.format = media[m]["format"].str();
                 a.discNumber = media[m]["position"].integer(int(m) + 1);
@@ -192,11 +198,15 @@ std::string luceneEscape(const std::string& s) {
     return o;
 }
 
-std::string mbSearchQuery(const std::string& artist, const std::string& album, int trackCount) {
+std::string mbSearchQuery(const std::string& artist, const std::string& album, int trackCount,
+                          int altTrackCount) {
     std::vector<std::string> parts;
     if (!album.empty()) parts.push_back("release:(" + luceneEscape(album) + ")");
     if (!artist.empty()) parts.push_back("artist:(" + luceneEscape(artist) + ")");
-    if (trackCount > 0) parts.push_back("tracksmedium:" + std::to_string(trackCount));
+    if (trackCount > 0 && altTrackCount > 0 && altTrackCount != trackCount)
+        parts.push_back("tracksmedium:(" + std::to_string(trackCount) + " OR " + std::to_string(altTrackCount) + ")");
+    else if (trackCount > 0)
+        parts.push_back("tracksmedium:" + std::to_string(trackCount));
     std::string q;
     for (size_t i = 0; i < parts.size(); ++i) q += (i ? " AND " : "") + parts[i];
     return q;

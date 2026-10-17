@@ -8,7 +8,9 @@ namespace ln {
 bool readDiscToc(const std::wstring& drive, DiscToc& out, std::string& error) {
     if (drive.size() < 2) { error = "bad drive specifier"; return false; }
     std::wstring dev = L"\\\\.\\" + drive.substr(0, 2);
+    double t0 = nowMs();
     HANDLE h = CreateFileW(dev.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (nowMs() - t0 > 200) logf("Opening %s took %.0f ms.", narrow(dev).c_str(), nowMs() - t0);
     if (h == INVALID_HANDLE_VALUE) { error = "open " + narrow(dev) + " failed, error " + std::to_string(GetLastError()); return false; }
 
     CDROM_TOC toc = {};
@@ -19,6 +21,7 @@ bool readDiscToc(const std::wstring& drive, DiscToc& out, std::string& error) {
         if (!ok) {
             DWORD e = GetLastError();
             if (e != ERROR_NOT_READY && e != ERROR_MEDIA_CHANGED && e != ERROR_BUSY) break;
+            logf("Drive not ready to give its table of contents (error %lu); trying again in a second.", e);
             Sleep(1000);
         }
     }

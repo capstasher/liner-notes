@@ -1,6 +1,7 @@
 // Album/track model shared by every metadata source, plus ranking and
 // (de)serialisation for the local disc cache.
 #pragma once
+#include "discid.h"
 #include <string>
 #include <vector>
 
@@ -44,6 +45,19 @@ bool candidatesEquivalent(const std::vector<AlbumMeta>& c);
 
 // Heuristic: are these WMP's placeholder titles ("Track 1", "Piste 2", ...)?
 bool looksLikePlaceholderTitles(const std::vector<std::string>& titles);
+
+// Titles the databases give data tracks: MusicBrainz's "[data track]" and GnuDB's usual
+// "Data", "Data Track", "CD-ROM data"... With bracketedOnly, only MusicBrainz's spelling.
+bool isDataTrackTitle(const std::string& title, bool bracketedOnly = false);
+
+// WMP's CD playlist lists audio tracks only, but MusicBrainz lists a leading data track
+// (mixed-mode game CDs) as track 1, and GnuDB lists every track on the disc. This drops those
+// entries so the tracklist lines up with WMP's, using the TOC's data flags when the count
+// matches the disc, or data-track titles when it doesn't. Renumbers the survivors 1..n and
+// fills missing lengths from the TOC. Idempotent; returns how many tracks were dropped.
+int alignToDisc(AlbumMeta& a, const DiscToc& toc);
+// The same without a TOC: drops data-track-titled entries while more than `audioTracks` remain.
+int dropDataTrackTitles(AlbumMeta& a, int audioTracks);
 
 std::string albumToJson(const AlbumMeta& a);
 bool albumFromJson(const std::string& text, AlbumMeta& out);

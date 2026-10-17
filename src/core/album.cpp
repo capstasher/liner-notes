@@ -113,6 +113,65 @@ bool looksLikePlaceholderTitles(const std::vector<std::string>& titles) {
     return true;
 }
 
+static std::string lowerTrimmed(const std::string& s) {
+    size_t b = 0, e = s.size();
+    while (b < e && std::isspace((unsigned char)s[b])) ++b;
+    while (e > b && std::isspace((unsigned char)s[e - 1])) --e;
+    std::string o = s.substr(b, e - b);
+    for (auto& c : o) c = char(std::tolower((unsigned char)c));
+    return o;
+}
+
+bool isDataTrackTitle(const std::string& title, bool bracketedOnly) {
+    std::string t = lowerTrimmed(title);
+    if (bracketedOnly) return t == "[data track]";
+    if (t.size() >= 2 && ((t.front() == '[' && t.back() == ']') || (t.front() == '(' && t.back() == ')')))
+        t = lowerTrimmed(t.substr(1, t.size() - 2));
+    static const char* const known[] = {"data track", "data", "data (cd-rom)", "cd-rom data", "cd-rom track",
+                                        "cd-rom", "cdrom", "cdrom data", "computer data", "multimedia data",
+                                        "multimedia track", "enhanced cd", "cd-extra", "video data"};
+    for (const char* k : known)
+        if (t == k) return true;
+    return false;
+}
+
+static void renumber(AlbumMeta& a) {
+    for (size_t i = 0; i < a.tracks.size(); ++i) a.tracks[i].number = int(i) + 1;
+}
+
+int dropDataTrackTitles(AlbumMeta& a, int audioTracks) {
+    int dropped = 0;
+    for (size_t i = 0; i < a.tracks.size() && int(a.tracks.size()) > audioTracks;) {
+        if (isDataTrackTitle(a.tracks[i].title)) { a.tracks.erase(a.tracks.begin() + long(i)); ++dropped; }
+        else ++i;
+    }
+    if (dropped) renumber(a);
+    return dropped;
+}
+
+int alignToDisc(AlbumMeta& a, const DiscToc& toc) {
+    const int audio = toc.audioTrackCount();
+    const int n = int(a.tracks.size());
+    int dropped = 0;
+    if (n > audio && audio < toc.trackCount() && (n == toc.trackCount() || n == toc.mbTrackCount())) {
+        // The source counts physical tracks from the first one: drop the ones the TOC marks as data.
+        std::vector<TrackMeta> kept;
+        for (int i = 0; i < n; ++i)
+            if (!(size_t(i) < toc.isData.size() && toc.isData[size_t(i)])) kept.push_back(a.tracks[size_t(i)]);
+        dropped = n - int(kept.size());
+        a.tracks.swap(kept);
+        if (dropped) renumber(a);
+    } else if (n > audio) {
+        dropped = dropDataTrackTitles(a, audio);
+    }
+    if (int(a.tracks.size()) == audio) {
+        const std::vector<int> idx = toc.audioTrackIndices();
+        for (size_t i = 0; i < a.tracks.size(); ++i)
+            if (a.tracks[i].lengthMs <= 0) a.tracks[i].lengthMs = toc.trackLengthMs(size_t(idx[i]));
+    }
+    return dropped;
+}
+
 std::string formatDuration(int ms) {
     if (ms <= 0) return "";
     int s = (ms + 500) / 1000;

@@ -101,6 +101,18 @@ int main() {
     CHECK(te.audioTrackCount() == 7);
     CHECK_EQ(ln::musicBrainzTocParam(te), std::string("1+7+114574+150+14109+33586+53077+65781+77892+99174"));
 
+    // --- Remembered TOCs round-trip, data flags included
+    {
+        ln::DiscToc back;
+        CHECK_EQ(ln::tocToString(te), std::string("1 8 188483 150 14109 33586 53077 65781 77892 99174 125974d"));
+        CHECK(ln::tocFromString(ln::tocToString(te) + "\r\n", back));
+        CHECK(back.offsets == te.offsets && back.isData == te.isData && back.leadout == te.leadout);
+        CHECK_EQ(ln::musicBrainzDiscId(back), ln::musicBrainzDiscId(te));
+        CHECK(!ln::tocFromString("", back));
+        CHECK(!ln::tocFromString("1 2 300 150 x", back));
+        CHECK(!ln::tocFromString("1 2 100 150 200", back));      // lead-out before the last track
+    }
+
     // --- WM/MCDI fallback parser
     ln::DiscToc fromMcdi;
     CHECK(ln::parseWmpMcdi("6+96+3C03+7E3A+B600+F7B6+13A69+174E6", fromMcdi));
@@ -223,6 +235,122 @@ int main() {
     CHECK(ln::albumFromJson(ln::albumToJson(dated), rt));
     CHECK_EQ(rt.originalDate, std::string("1987-05-01"));
     CHECK_EQ(rt.originalYear(), std::string("1987"));
+
+    // --- Mixed-mode disc (Half-Life's CD-ROM): data track 1, then 27 audio tracks. WMP lists
+    //     the 27 audio tracks; MusicBrainz and GnuDB both count the data track.
+    {
+        std::vector<int> offs = {150, 130650};               // 29 minutes of game data first
+        for (int k = 1; k < 27; ++k) offs.push_back(offs.back() + 9000 + 75 * k);
+        std::vector<bool> data(offs.size(), false);
+        data[0] = true;
+        auto hl = makeToc(1, offs, offs.back() + 9000, data);
+        CHECK(hl.valid());
+        CHECK(hl.trackCount() == 28 && hl.audioTrackCount() == 27 && hl.mbTrackCount() == 28);
+        CHECK(hl.audioTrackIndices().size() == 27 && hl.audioTrackIndices()[0] == 1);
+        CHECK(hl.trackLengthMs(1) == 121000);                 // first audio track: 9075 frames
+
+        auto title = [](int audioNo) -> std::string {
+            switch (audioNo) {
+                case 1: return "Adrenaline Horror";
+                case 2: return "Vague Voices (Black Mesa Inbound)";
+                case 3: return "Klaxon Beat";
+                case 25: return "Threatening Short";
+                case 26: return "Dark Piano Short";
+                case 27: return "Sharp Fear Short";
+                default: return "Cue " + std::to_string(audioNo);
+            }
+        };
+        std::string js = R"({"id":"HL","releases":[{"id":"hl-1998","title":"Half-Life","status":"Official",)"
+                         R"("media":[{"position":1,"format":"CD","track-count":28,"discs":[{"id":"HL"}],"tracks":[)"
+                         R"({"position":1,"title":"[data track]","length":1740000})";
+        for (int k = 1; k <= 27; ++k)
+            js += ",{\"position\":" + std::to_string(k + 1) + ",\"title\":\"" + title(k) + "\"" +
+                  (k == 2 ? "" : ",\"length\":100000") + "}";      // track 2 has no length on purpose
+        js += "]}]}]}";
+        CHECK(ln::json::parse(js, v, &err));
+        cands.clear();
+        CHECK(ln::parseMbDiscResponse(v, "HL", hl.mbTrackCount(), cands, hl.audioTrackCount()));
+        CHECK(cands.size() == 1);
+        if (cands.size() == 1) {
+            ln::AlbumMeta a = cands[0];
+            CHECK(a.tracks.size() == 28);
+            CHECK(ln::alignToDisc(a, hl) == 1);
+            CHECK(a.tracks.size() == 27);
+            CHECK_EQ(a.tracks[0].title, std::string("Adrenaline Horror"));
+            CHECK_EQ(a.tracks[1].title, std::string("Vague Voices (Black Mesa Inbound)"));
+            CHECK_EQ(a.tracks[25].title, std::string("Dark Piano Short"));
+            CHECK_EQ(a.tracks[26].title, std::string("Sharp Fear Short"));
+            CHECK(a.tracks[0].number == 1 && a.tracks[26].number == 27);
+            CHECK(a.tracks[1].lengthMs == hl.trackLengthMs(2));   // filled from the right TOC entry
+            CHECK(ln::alignToDisc(a, hl) == 0 && a.tracks.size() == 27);   // idempotent
+
+            // A 1.0.0 cache entry still holds the data track; loading and aligning repairs it.
+            ln::AlbumMeta old = cands[0], back;
+            CHECK(ln::albumFromJson(ln::albumToJson(old), back));
+            CHECK(back.tracks.size() == 28 && ln::alignToDisc(back, hl) == 1);
+            CHECK_EQ(back.tracks[0].title, std::string("Adrenaline Horror"));
+
+            // Without a TOC (search fallback), the data-track title gives it away.
+            ln::AlbumMeta noToc = cands[0];
+            CHECK(ln::dropDataTrackTitles(noToc, 27) == 1 && noToc.tracks.size() == 27);
+            CHECK_EQ(noToc.tracks[26].title, std::string("Sharp Fear Short"));
+        }
+
+        // Fuzzy TOC hit and CD stub: the medium counts 28, WMP 27; both are still accepted.
+        CHECK(ln::json::parse(R"({"releases":[{"id":"f","title":"Half-Life","media":[{"format":"CD","track-count":28}]}]})", v, &err));
+        cands.clear();
+        CHECK(ln::parseMbDiscResponse(v, "zzz", hl.mbTrackCount(), cands, hl.audioTrackCount()));
+        CHECK(cands.size() == 1);
+
+        // Searching and fetching from the window find the 28-track medium too.
+        CHECK(ln::json::parse(R"({"releases":[{"id":"s","score":100,"title":"Half-Life","media":[{"format":"CD","track-count":28,"position":1}]}]})", v, &err));
+        cands.clear();
+        CHECK(ln::parseMbSearchResponse(v, 27, cands, 28));
+        CHECK(cands.size() == 1);
+        CHECK_EQ(ln::mbSearchQuery("Kelly Bailey", "Half-Life", 27, 28),
+                 std::string("release:(Half\\-Life) AND artist:(Kelly Bailey) AND tracksmedium:(27 OR 28)"));
+        CHECK_EQ(ln::mbSearchQuery("", "X", 10, 10), std::string("release:(X) AND tracksmedium:10"));
+
+        // GnuDB lists every track, the data track included, with whatever title the submitter chose.
+        std::string gnu = "210 misc 12345678 CD database entry follows\r\nDTITLE=Kelly Bailey / Half-Life\r\nTTITLE0=Data\r\n";
+        for (int k = 1; k <= 27; ++k) gnu += "TTITLE" + std::to_string(k) + "=" + title(k) + "\r\n";
+        gnu += ".\r\n";
+        ln::AlbumMeta gd;
+        CHECK(ln::parseGnuRead(gnu, gd));
+        CHECK(gd.tracks.size() == 28 && ln::alignToDisc(gd, hl) == 1);
+        CHECK_EQ(gd.tracks[0].title, std::string("Adrenaline Horror"));
+        CHECK(gd.tracks[0].lengthMs == 121000);
+    }
+
+    // --- Enhanced CD: MusicBrainz already leaves the trailing data track out, GnuDB doesn't.
+    {
+        ln::AlbumMeta mb;
+        for (int k = 1; k <= 7; ++k) mb.tracks.push_back({k, "Song " + std::to_string(k), "", 0});
+        CHECK(ln::alignToDisc(mb, te) == 0 && mb.tracks.size() == 7);
+        CHECK(mb.tracks[6].lengthMs == (114574 - 99174) * 1000 / 75);   // ends at the session gap
+        ln::AlbumMeta gd = mb;
+        gd.tracks.push_back({8, "Enhanced CD", "", 0});
+        CHECK(ln::alignToDisc(gd, te) == 1 && gd.tracks.size() == 7);
+        CHECK_EQ(gd.tracks[6].title, std::string("Song 7"));
+    }
+
+    // --- An ordinary audio CD is left exactly as it was
+    {
+        ln::AlbumMeta a;
+        for (int k = 1; k <= 6; ++k) a.tracks.push_back({k, k == 3 ? "Data" : "Song", "", 1000});
+        CHECK(ln::alignToDisc(a, t6) == 0 && a.tracks.size() == 6);
+        CHECK_EQ(a.tracks[2].title, std::string("Data"));        // a song can be called "Data"
+    }
+
+    // --- Data-track titles
+    CHECK(ln::isDataTrackTitle("[data track]"));
+    CHECK(ln::isDataTrackTitle(" [Data Track] "));
+    CHECK(ln::isDataTrackTitle("Data"));
+    CHECK(ln::isDataTrackTitle("(CD-ROM Data)"));
+    CHECK(!ln::isDataTrackTitle("Datagram"));
+    CHECK(!ln::isDataTrackTitle("Adrenaline Horror"));
+    CHECK(ln::isDataTrackTitle("[DATA TRACK]", true));
+    CHECK(!ln::isDataTrackTitle("Data", true));
 
     // --- Nōto's voice
     {

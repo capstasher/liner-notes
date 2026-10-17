@@ -40,4 +40,29 @@ extern volatile LONG g_lockCount;  // outstanding objects/locks for DllCanUnload
 // Worker thread that keeps the DLL loaded until it finishes.
 bool startWorker(void (*fn)(void*), void* arg);
 
+// ---- timing: anything that holds up WMP's own thread shows up in the log ----
+double nowMs();                         // monotonic milliseconds
+void setWmpThread();                    // call on WMP's thread (SetCore)
+bool onWmpThread();
+double wmpThreadLogMs();                // total time WMP's thread has spent writing our log
+
+// What the worker threads are doing, so a stall report can say whether we were busy.
+enum class Phase : LONG { Idle, ReadingToc, AskingMusicBrainz, AskingGnuDb };
+void setPhase(Phase p);
+const char* phaseText();
+
+// Times a piece of LinerNotes' own work on WMP's thread and logs it when it takes longer
+// than `thresholdMs`. Top-level timers also add to ourWmpThreadMs(), which the stall
+// watchdog subtracts so it can tell WMP's own pauses from ours.
+class WmpThreadTimer {
+public:
+    explicit WmpThreadTimer(const char* what, bool topLevel = false, double thresholdMs = 100);
+    ~WmpThreadTimer();
+private:
+    const char* m_what;
+    bool m_top;
+    double m_threshold, m_t0, m_log0;
+};
+double ourWmpThreadMs();
+
 } // namespace ln

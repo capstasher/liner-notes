@@ -51,4 +51,4 @@ static const CLSID CLSID_LinerNotesPlugin =
     {0x6b1c43e2, 0x5f0a, 0x4c8b, {0x9e, 0x5d, 0x2a, 0x7f, 0x31, 0xc9, 0xd4, 0xb8}};
 #define LINERNOTES_CLSID_STR L"{6B1C43E2-5F0A-4C8B-9E5D-2A7F31C9D4B8}"
 #define LINERNOTES_NAME      L"LinerNotes"
-#define LINERNOTES_VERSION   "1.0.0"
+#define LINERNOTES_VERSION   "1.0.1"
