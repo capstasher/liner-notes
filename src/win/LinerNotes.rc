@@ -11,8 +11,8 @@ IDB_NOTO_HAPPY BITMAP "noto-happy.bmp"
 IDB_NOTO_SORRY BITMAP "noto-sorry.bmp"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION     1,0,0,0
- PRODUCTVERSION  1,0,0,0
+ FILEVERSION     1,0,1,0
+ PRODUCTVERSION  1,0,1,0
  FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
  FILEFLAGS       0
  FILEOS          VOS_NT_WINDOWS32
@@ -25,12 +25,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "capstasher"
             VALUE "FileDescription",  "LinerNotes - CD album info for Windows Media Player 12"
-            VALUE "FileVersion",      "1.0.0"
+            VALUE "FileVersion",      "1.0.1"
             VALUE "InternalName",     "LinerNotes"
             VALUE "LegalCopyright",   "Copyright (c) 2026 capstasher. MIT License."
             VALUE "OriginalFilename", "LinerNotes.dll"
             VALUE "ProductName",      "LinerNotes"
-            VALUE "ProductVersion",   "1.0.0"
+            VALUE "ProductVersion",   "1.0.1"
             VALUE "Comments",         "Noto reads your CD and asks MusicBrainz what it is."
         END
     END

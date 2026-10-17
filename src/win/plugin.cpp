@@ -17,6 +17,7 @@ const IID kIID_IWMPPluginUI = {0x4c5e8f9f, 0xad3e, 0x4bf9, {0x97, 0x53, 0xfc, 0x
 const UINT WM_APP_LOOKUP_DONE = WM_APP + 1;
 const UINT WM_APP_OPEN_DIALOG = WM_APP + 2;
 const UINT_PTR TIMER_INITIAL = 1;
+const UINT_PTR TIMER_WATCHDOG = 50;
 const UINT_PTR TIMER_SCAN_BASE = 100;     // + drive index
 const UINT_PTR TIMER_VERIFY_BASE = 300;   // + drive index
 const wchar_t* kMsgClass = L"LinerNotesMsgWnd";
@@ -76,6 +77,7 @@ STDMETHODIMP_(ULONG) Plugin::Release() {
 STDMETHODIMP Plugin::SetCore(IWMPCore* pCore) {
     if (!pCore) { logLine("SetCore(NULL): shutting down."); shutdown(); return S_OK; }
     shutdown();
+    setWmpThread();
     { Settings fresh; fresh.load(); updateSettings(fresh); }
     logf("%s here! LinerNotes %s starting (%s build).", noto::name().c_str(), LINERNOTES_VERSION,
          sizeof(void*) == 8 ? "64-bit" : "32-bit");
@@ -100,12 +102,14 @@ STDMETHODIMP Plugin::SetCore(IWMPCore* pCore) {
         cpc->Release();
     }
     if (m_hwnd) SetTimer(m_hwnd, TIMER_INITIAL, 2500, nullptr);   // a disc may already be in the drive
+    armWatchdog();
     return S_OK;
 }
 
 void Plugin::shutdown() {
     if (m_cp) { m_cp->Unadvise(m_cookie); safeRelease(m_cp); m_cookie = 0; }
     if (m_hwnd) { DestroyWindow(m_hwnd); m_hwnd = nullptr; }   // in-flight results then fail to post and free themselves
+    m_watching = false;
     safeRelease(m_core);
     m_drives.clear();
 }
@@ -116,7 +120,12 @@ LRESULT CALLBACK Plugin::MsgWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     auto* self = reinterpret_cast<Plugin*>(GetWindowLongPtrW(h, GWLP_USERDATA));
     if (self) {
         if (msg == WM_TIMER) { self->AddRef(); self->onTimer(UINT_PTR(wp)); self->Release(); return 0; }
-        if (msg == WM_APP_LOOKUP_DONE) { self->AddRef(); self->onLookupDone(int(wp), reinterpret_cast<LookupPayload*>(lp)); self->Release(); return 0; }
+        if (msg == WM_APP_LOOKUP_DONE) {
+            self->AddRef();
+            { WmpThreadTimer t("handling the lookup result", true); self->onLookupDone(int(wp), reinterpret_cast<LookupPayload*>(lp)); }
+            self->Release();
+            return 0;
+        }
         if (msg == WM_APP_OPEN_DIALOG) { self->AddRef(); self->openDialog(int(wp), nullptr); self->Release(); return 0; }
     } else if (msg == WM_APP_LOOKUP_DONE) {
         delete reinterpret_cast<LookupPayload*>(lp);
@@ -126,18 +135,42 @@ LRESULT CALLBACK Plugin::MsgWndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 void Plugin::onTimer(UINT_PTR id) {
+    if (id == TIMER_WATCHDOG) { watchdogTick(); return; }
     KillTimer(m_hwnd, id);
-    if (id == TIMER_INITIAL) scanAllDrives();
-    else if (id >= TIMER_SCAN_BASE && id < TIMER_SCAN_BASE + 26) scanDrive(int(id - TIMER_SCAN_BASE));
-    else if (id >= TIMER_VERIFY_BASE && id < TIMER_VERIFY_BASE + 26) verify(int(id - TIMER_VERIFY_BASE));
+    if (id == TIMER_INITIAL) { WmpThreadTimer t("the first drive scan", true); scanAllDrives(); }
+    else if (id >= TIMER_SCAN_BASE && id < TIMER_SCAN_BASE + 26) { WmpThreadTimer t("checking for the CD's tracks", true); scanDrive(int(id - TIMER_SCAN_BASE)); }
+    else if (id >= TIMER_VERIFY_BASE && id < TIMER_VERIFY_BASE + 26) { WmpThreadTimer t("checking the titles stuck", true); verify(int(id - TIMER_VERIFY_BASE)); }
+}
+
+void Plugin::armWatchdog() {
+    if (!m_hwnd) return;
+    m_watchUntil = nowMs() + 90000;
+    if (m_watching) return;
+    m_watching = true;
+    m_lastTick = nowMs();
+    m_ourAtTick = ourWmpThreadMs();
+    SetTimer(m_hwnd, TIMER_WATCHDOG, 250, nullptr);
+}
+
+void Plugin::watchdogTick() {
+    const double now = nowMs(), gap = now - m_lastTick, ours = ourWmpThreadMs() - m_ourAtTick;
+    if (gap >= 1000)
+        logf("Watchdog: WMP's thread was stuck for the %.1f s before this line (%.1f s of it in LinerNotes' own code). "
+             "My lookup thread is now %s.", gap / 1000, ours / 1000, phaseText());
+    m_lastTick = now;
+    m_ourAtTick = ourWmpThreadMs();
+    if (now > m_watchUntil) { KillTimer(m_hwnd, TIMER_WATCHDOG); m_watching = false; }
 }
 
 // --------------------------------------------------------------------- CD handling
 
 void Plugin::CdromMediaChange(long num) {
     if (!m_hwnd || num < 0 || num > 25) return;
+    WmpThreadTimer t("CdromMediaChange", true);
     logf("CdromMediaChange(%ld)", num);
+    armWatchdog();
     DriveState& st = m_drives[int(num)];
+    st.changedAt = nowMs();
     st.generation++;           // invalidates any lookup still running for the previous disc
     st.busy = false;
     st.waitTries = 0;
@@ -186,8 +219,15 @@ void Plugin::scanDrive(int idx) {
     IWMPPlaylist* pl = nullptr;
     std::wstring drive;
     long count = 0;
-    if (getPlaylist(idx, &pl, &drive)) { pl->get_count(&count); pl->Release(); }
+    {
+        WmpThreadTimer t("asking WMP for the CD's track list");
+        if (getPlaylist(idx, &pl, &drive)) { pl->get_count(&count); pl->Release(); }
+    }
     if (!drive.empty()) st.drive = drive;
+    if (count > 0 && st.changedAt > 0) {
+        logf("WMP listed %ld tracks %.1f s after the disc went in.", count, (nowMs() - st.changedAt) / 1000);
+        st.changedAt = 0;
+    }
     if (count <= 0) {
         // WMP fills the CD playlist asynchronously; an empty drive never fills it.
         if (++st.waitTries <= 8) { SetTimer(m_hwnd, TIMER_SCAN_BASE + idx, 1500, nullptr); return; }
@@ -208,6 +248,18 @@ void Plugin::startLookup(int idx, bool useCache) {
     if (st.drive.empty() || !m_hwnd) return;
     auto* p = new LookupPayload{idx, st.generation, useCache, m_hwnd, DiscLookup()};
     p->lookup.drive = st.drive;
+    {   // WMP's own copy of the TOC: lets the lookup skip the drive for discs it has met before
+        IWMPPlaylist* pl = nullptr;
+        if (getPlaylist(idx, &pl, nullptr)) {
+            IWMPMedia* m = nullptr;
+            if (SUCCEEDED(pl->WMP_PLAYLIST_ITEM(0, &m)) && m) {
+                p->lookup.wmpToc = getInfo(m, L"TOC");
+                if (p->lookup.wmpToc.empty()) p->lookup.wmpToc = getInfo(m, L"WM/MCDI");
+                m->Release();
+            }
+            pl->Release();
+        }
+    }
     st.busy = true;
     st.status = "Looking up disc online...";
     st.say = noto::lookingUp();
@@ -310,16 +362,28 @@ void Plugin::dumpAttributes(IWMPMedia* m, IWMPPlaylist* pl) {
 }
 
 // WMP 10+ ignores WM/Year; the year lives in ReleaseDate (a date), with ReleaseDateYear derived
-// from it. Which string spelling WMP accepts isn't documented, so probe on track 1, read back,
-// and remember the winner for the session.
-bool Plugin::writeYear(const std::vector<IWMPMedia*>& items, const std::string& y, std::string& dateValue) {
+// from it. Which string spelling WMP accepts isn't documented, so probe on the first track that
+// needs it, read back, and remember the winner for the session. Tracks that already show the
+// year are left alone: every write costs WMP real work.
+bool Plugin::writeYear(const std::vector<IWMPMedia*>& items, const std::string& y, std::string& dateValue,
+                       int& written, int& unchanged) {
     struct Way { const wchar_t* attr; std::string value; };
     // ReleaseDate is the stored value; ReleaseDateYear is derived from it, so it's the last resort
     // (v0.1 wrote it first, and WMP still showed an unknown year).
     const Way ways[] = {{L"ReleaseDate", "1/1/" + y}, {L"ReleaseDate", y + "-01-01"}, {L"ReleaseDate", "7/7/" + y},
                         {L"ReleaseDate", y}, {L"ReleaseDateYear", y}};
     const int nWays = int(sizeof ways / sizeof ways[0]);
-    IWMPMedia* first = items.front();
+    std::vector<IWMPMedia*> todo;
+    for (auto* m : items) {
+        if (getInfo(m, L"ReleaseDateYear") == y) ++unchanged;
+        else todo.push_back(m);
+    }
+    if (todo.empty()) {
+        dateValue = getInfo(items.front(), L"ReleaseDate");
+        if (dateValue.empty()) dateValue = "1/1/" + y;
+        return true;
+    }
+    IWMPMedia* first = todo.front();
     auto set = [](IWMPMedia* m, const Way& w) {
         Bstr n(w.attr);
         VARIANT_BOOL ro = VARIANT_FALSE;
@@ -342,14 +406,16 @@ bool Plugin::writeYear(const std::vector<IWMPMedia*>& items, const std::string& 
     int use = winner >= 0 ? winner : 0;              // unverified: 1/1/YYYY reads the same in d/m and m/d locales
     if (winner >= 0) m_yearMethod = winner;
     else logf("Year %s could not be verified on track 1; writing ReleaseDate=\"%s\" anyway.", y.c_str(), ways[use].value.c_str());
-    for (size_t i = 0; i < items.size(); ++i)
-        if (i > 0 || winner < 0) set(items[i], ways[use]);
+    if (winner >= 0) ++written;
+    for (size_t i = 0; i < todo.size(); ++i)
+        if ((i > 0 || winner < 0) && set(todo[i], ways[use])) ++written;
     dateValue = std::wcscmp(ways[use].attr, L"ReleaseDate") == 0 ? ways[use].value : "1/1/" + y;
     return winner >= 0;
 }
 
-bool Plugin::applyAlbum(int idx, const AlbumMeta& album, bool userInitiated, std::string& message) {
+bool Plugin::applyAlbum(int idx, const AlbumMeta& chosen, bool userInitiated, std::string& message) {
     DriveState& st = m_drives[idx];
+    AlbumMeta album = chosen;
     IWMPPlaylist* pl = nullptr;
     if (!getPlaylist(idx, &pl, nullptr)) { message = "The CD is no longer available."; st.say = noto::cdGone(); return false; }
     long count = 0;
@@ -358,15 +424,26 @@ bool Plugin::applyAlbum(int idx, const AlbumMeta& album, bool userInitiated, std
 
     std::vector<IWMPMedia*> items;
     std::vector<std::string> currentTitles;
-    for (long i = 0; i < count; ++i) {
-        IWMPMedia* m = nullptr;
-        if (SUCCEEDED(pl->WMP_PLAYLIST_ITEM(i, &m)) && m) { items.push_back(m); currentTitles.push_back(getInfo(m, L"Title")); }
+    {
+        WmpThreadTimer t("reading WMP's current titles");
+        for (long i = 0; i < count; ++i) {
+            IWMPMedia* m = nullptr;
+            if (SUCCEEDED(pl->WMP_PLAYLIST_ITEM(i, &m)) && m) { items.push_back(m); currentTitles.push_back(getInfo(m, L"Title")); }
+        }
     }
     const Settings cfg = settings();
-    if (!items.empty() && cfg.verboseLog && !m_dumped) { dumpAttributes(items[0], pl); m_dumped = true; }
+    if (!items.empty() && cfg.verboseLog && !m_dumped) {
+        WmpThreadTimer t("the attribute dump (verbose log)");
+        dumpAttributes(items[0], pl);
+        m_dumped = true;
+    }
 
     bool placeholders = looksLikePlaceholderTitles(currentTitles);
-    if (!userInitiated && !placeholders && !cfg.overwriteExisting) {
+    // WMP never lists data tracks, so a "[data track]" title on a CD item is always wrong: it's
+    // what 1.0.0 wrote on mixed-mode discs, with every title after it shifted by one.
+    bool leftoverDataTitle = false;
+    for (const auto& t : currentTitles) leftoverDataTitle = leftoverDataTitle || isDataTrackTitle(t, true);
+    if (!userInitiated && !placeholders && !leftoverDataTitle && !cfg.overwriteExisting) {
         for (auto* m : items) m->Release();
         pl->Release();
         message = "WMP already has titles for this disc; left them alone.";
@@ -374,13 +451,26 @@ bool Plugin::applyAlbum(int idx, const AlbumMeta& album, bool userInitiated, std
         logLine(message);
         return false;
     }
-    if (int(items.size()) != int(album.tracks.size()))
+    if (leftoverDataTitle && !placeholders && !userInitiated)
+        logLine("WMP's titles for this disc include \"[data track]\" and are shifted by one; replacing them.");
+
+    // Last line of defence for tracklists the TOC couldn't align (no TOC, or an odd count).
+    if (album.tracks.size() > items.size()) {
+        int dropped = dropDataTrackTitles(album, int(items.size()));
+        if (dropped) logf("Left %d data track(s) out of the tracklist to match WMP's %d tracks.", dropped, int(items.size()));
+    }
+    const bool sameCount = items.size() == album.tracks.size();
+    if (!sameCount)
         logf("Track count differs: WMP %d vs %s %d. Mapping by track number.", int(items.size()), album.source.c_str(), int(album.tracks.size()));
 
-    int written = 0, refused = 0;
+    // Every setItemInfo makes WMP update its library (and, for discs you've ripped, the ripped
+    // copies too), and that work keeps its window busy long after we've finished. So nothing is
+    // written that WMP already has: re-inserting a disc it remembers costs nothing.
+    int written = 0, unchanged = 0, refused = 0;
     std::string refusedNames;
     auto put = [&](IWMPMedia* m, const wchar_t* name, const std::string& value) {
         if (value.empty()) return false;
+        if (getInfo(m, name) == value) { ++unchanged; return true; }
         Bstr n(name);
         VARIANT_BOOL ro = VARIANT_FALSE;
         if (SUCCEEDED(m->isReadOnlyItem(n.b, &ro)) && ro) {
@@ -394,51 +484,80 @@ bool Plugin::applyAlbum(int idx, const AlbumMeta& album, bool userInitiated, std
         ++written;
         return true;
     };
-
-    for (size_t i = 0; i < items.size(); ++i) {
-        IWMPMedia* m = items[i];
-        int number = std::atoi(getInfo(m, L"WM/TrackNumber").c_str());
-        size_t t = (number >= 1 && number <= int(album.tracks.size())) ? size_t(number - 1) : i;
-        if (t < album.tracks.size()) {
-            put(m, L"Title", album.tracks[t].title);
-            put(m, L"Author", album.trackArtist(t));
+    // Album-level attributes of the CD playlist itself (documented for CD playlists; WMP's CD view
+    // may read the header from here). Written first, in case WMP passes them on to the tracks,
+    // which then need no writes of their own.
+    auto plGet = [&](const wchar_t* name) {
+        Bstr n(name), v;
+        if (FAILED(pl->getItemInfo(n.b, &v.b))) return std::string();
+        return v.utf8();
+    };
+    auto plPut = [&](const wchar_t* name, const std::string& value) {
+        if (value.empty()) return;
+        if (plGet(name) == value) { ++unchanged; return; }
+        Bstr n(name), v(widen(value));
+        HRESULT hr = pl->setItemInfo(n.b, v.b);
+        if (SUCCEEDED(hr)) ++written;
+        else if (cfg.verboseLog) logf("CD playlist %s refused: 0x%08lx", narrow(name).c_str(), hr);
+    };
+    {
+        WmpThreadTimer t("writing the CD playlist's details");
+        Bstr cur;
+        std::string want = album.displayTitle();
+        if (SUCCEEDED(pl->get_name(&cur.b)) && cur.utf8() == want) ++unchanged;
+        else {
+            Bstr nm(widen(want));
+            HRESULT hr = pl->put_name(nm.b);
+            if (SUCCEEDED(hr)) ++written;
+            else if (cfg.verboseLog) logf("CD playlist name refused: 0x%08lx", hr);
         }
-        put(m, L"WM/AlbumTitle", album.displayTitle());
-        put(m, L"WM/AlbumArtist", album.artist);
-        put(m, L"WM/Genre", album.genre);
-        put(m, L"WM/Publisher", album.label);
+        plPut(L"Author", album.artist);
+        plPut(L"WM/Genre", album.genre);
+        plPut(L"WM/Publisher", album.label);
+    }
+
+    {
+        WmpThreadTimer t("writing titles and album details");
+        for (size_t i = 0; i < items.size(); ++i) {
+            IWMPMedia* m = items[i];
+            // WMP's CD playlist is the audio tracks in disc order, so position is the reliable key;
+            // its own track numbers only help when the counts disagree.
+            size_t t = i;
+            if (!sameCount) {
+                int number = std::atoi(getInfo(m, L"WM/TrackNumber").c_str());
+                if (number >= 1 && number <= int(album.tracks.size())) t = size_t(number - 1);
+            }
+            if (t < album.tracks.size()) {
+                put(m, L"Title", album.tracks[t].title);
+                put(m, L"Author", album.trackArtist(t));
+            }
+            put(m, L"WM/AlbumTitle", album.displayTitle());
+            put(m, L"WM/AlbumArtist", album.artist);
+            put(m, L"WM/Genre", album.genre);
+            put(m, L"WM/Publisher", album.label);
+        }
     }
 
     std::string year = album.originalYear(), dateValue;
     bool yearOk = false;
-    if (!year.empty() && !items.empty()) yearOk = writeYear(items, year, dateValue);
-
-    // Album-level attributes of the CD playlist itself (documented for CD playlists; WMP's
-    // CD view may read the header from here rather than from the tracks).
-    auto plPut = [&](const wchar_t* name, const std::string& value) {
-        if (value.empty()) return;
-        Bstr n(name), v(widen(value));
-        HRESULT hr = pl->setItemInfo(n.b, v.b);
-        if (FAILED(hr) && cfg.verboseLog) logf("CD playlist %s refused: 0x%08lx", narrow(name).c_str(), hr);
-    };
-    { Bstr nm(widen(album.displayTitle())); HRESULT hr = pl->put_name(nm.b); if (FAILED(hr) && cfg.verboseLog) logf("CD playlist name refused: 0x%08lx", hr); }
-    plPut(L"Author", album.artist);
-    plPut(L"WM/Genre", album.genre);
-    plPut(L"WM/Publisher", album.label);
-    plPut(L"ReleaseDate", dateValue);
+    if (!year.empty() && !items.empty()) {
+        WmpThreadTimer t("writing the year");
+        yearOk = writeYear(items, year, dateValue, written, unchanged);
+        plPut(L"ReleaseDate", dateValue);
+    }
 
     for (auto* m : items) m->Release();
     std::string check;
     { IWMPMedia* m = nullptr; if (SUCCEEDED(pl->WMP_PLAYLIST_ITEM(0, &m)) && m) { check = getInfo(m, L"Title"); m->Release(); } }
     pl->Release();
 
-    logf("Applied \"%s\" by %s [%s %s]: %d values written, %d refused%s%s; year %s%s; track 1 now reads \"%s\".",
+    logf("Applied \"%s\" by %s [%s %s]: %d values written, %d already right, %d refused%s%s; year %s%s; track 1 now reads \"%s\".",
          album.displayTitle().c_str(), album.artist.c_str(), album.source.c_str(), album.id.c_str(),
-         written, refused, refusedNames.empty() ? "" : " (read-only: ", refusedNames.empty() ? "" : (refusedNames + ")").c_str(),
+         written, unchanged, refused, refusedNames.empty() ? "" : " (read-only: ", refusedNames.empty() ? "" : (refusedNames + ")").c_str(),
          year.empty() ? "unknown" : year.c_str(), year.empty() ? "" : (yearOk ? " (verified)" : " (unverified)"), check.c_str());
 
     st.applied = album;
-    st.hasApplied = written > 0;
+    st.hasApplied = written > 0 || unchanged > 0;
     st.verifyCount = 0;
     if (st.hasApplied) {
         if (st.haveLookup) saveToCache(st.lookup.mbDiscId, album);
@@ -515,10 +634,14 @@ HWND Plugin::findPlayerWindow() {
 
 void Plugin::openDialog(int idx, HWND owner) {
     if (m_hDlg && IsWindow(m_hDlg)) { notifyDialog(); SetForegroundWindow(m_hDlg); return; }
+    // Her window is modal: WMP's own window ignores clicks until it's closed.
+    logLine(owner ? "Opening my window (from WMP's Options)." : "Opening my window to ask which match is right.");
+    const double t0 = nowMs();
     if (!owner) owner = findPlayerWindow();
     AddRef();
     runLinerNotesDialog(this, owner, idx);
     Release();
+    logf("My window was open for %.0f s.", (nowMs() - t0) / 1000);
 }
 
 STDMETHODIMP Plugin::DisplayPropertyPage(HWND hwndParent) {

@@ -23,6 +23,7 @@ struct DriveState {
     bool hasApplied = false;
     AlbumMeta applied;
     int verifyCount = 0;
+    double changedAt = 0;        // nowMs() of the last CdromMediaChange, for timing WMP's track list
     std::string status;          // last status, plain (for the log)
     Line say;                    // the same moment in Noto's words, with her mood
 };
@@ -115,8 +116,13 @@ private:
     void shutdown();
     bool getPlaylist(int idx, IWMPPlaylist** pl, std::wstring* drive);
     void dumpAttributes(IWMPMedia* m, IWMPPlaylist* pl);
-    bool writeYear(const std::vector<IWMPMedia*>& items, const std::string& year, std::string& dateValue);
+    bool writeYear(const std::vector<IWMPMedia*>& items, const std::string& year, std::string& dateValue,
+                   int& written, int& unchanged);
     HWND findPlayerWindow();
+    // Stall watchdog: a 250 ms timer on WMP's thread for a while after each disc change.
+    // WM_TIMER only arrives when the thread is pumping messages, so a late tick is a freeze.
+    void armWatchdog();
+    void watchdogTick();
 
     LONG m_ref = 1;
     IWMPCore* m_core = nullptr;
@@ -128,6 +134,8 @@ private:
     int m_lastDrive = -1;
     int m_yearMethod = -1;                 // which ReleaseDate spelling WMP accepted (probed once)
     std::map<int, DriveState> m_drives;
+    bool m_watching = false;
+    double m_watchUntil = 0, m_lastTick = 0, m_ourAtTick = 0;
 };
 
 } // namespace ln

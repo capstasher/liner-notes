@@ -21,7 +21,15 @@ struct DiscToc {
     // moves the lead-out to (start of first trailing data track - 11400).
     int mbLastTrack() const;
     int mbLeadout() const;
+    // Tracks MusicBrainz lists for this disc: up to the last audio track, so a leading data
+    // track (mixed-mode game CDs such as Half-Life) is counted and trailing ones are not.
+    int mbTrackCount() const { return mbLastTrack() - firstTrack + 1; }
     int audioTrackCount() const;  // tracks WMP will show in its CD playlist
+    // Indices into `offsets` of the audio tracks, in disc order: one per WMP playlist item.
+    std::vector<int> audioTrackIndices() const;
+    // Length of the track at index i, from the TOC. The last audio track before a trailing
+    // data session ends at the session gap, not at the data track.
+    int trackLengthMs(size_t i) const;
 };
 
 std::string musicBrainzDiscId(const DiscToc& toc);
@@ -33,6 +41,10 @@ std::string freedbDiscIdHex(const DiscToc& toc);
 std::string gnudbQueryArgs(const DiscToc& toc);
 // Human-readable summary for logs
 std::string describeToc(const DiscToc& toc);
+
+// Compact round-trippable form for the cache: "first last leadout off1 off2d ..." ('d' = data).
+std::string tocToString(const DiscToc& toc);
+bool tocFromString(const std::string& s, DiscToc& out);
 
 // Parse WMP's WM/MCDI ("TOC") attribute string as a fallback TOC source.
 // Expected: hex values joined by '+': count, offsets..., lead-out.
